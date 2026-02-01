@@ -1,0 +1,23 @@
+# Секреты (самое важное!)
+.env
+*.env
+
+# Python кэш и байт-код
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Локальные базы данных
+*.db
+*.sqlite
+*.sqlite3
+
+# Логи
+*.log
+logs/
+
+# Редакторы/IDE
+.vscode/
+.idea/
+.thonny/
