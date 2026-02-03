@@ -11,15 +11,8 @@ from urllib.parse import urlparse  # Для разбора DATABASE_URL
 from dotenv import load_dotenv
 import psycopg2  # PostgreSQL для Supabase
 
+from telegram.ext import Updater, CommandHandler
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
-)
 
 # === ЗАГРУЗКА СЕКРЕТОВ (.env для локалки, Environment Variables для облака) ===
 load_dotenv()
