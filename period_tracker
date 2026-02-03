@@ -262,15 +262,13 @@ def main():
     init_db()
     
     # Создаём приложение
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ БОТ ЖИВОЙ! Наконец-то! 💃")
-
-def main():
-    print("🚀 Запуск бота...")
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    print("✅ Бот запущен!")
-    app.run_polling()
+async def start(update, context):
+    await update.message.reply_text("✅ БОТ ЖИВОЙ! 💃")
 
 if __name__ == "__main__":
-    main()
+    print("🚀 Запуск...")
+    from telegram.ext import Application, CommandHandler
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.run_polling()
+
