@@ -262,28 +262,18 @@ def main():
     init_db()
     
     # Создаём приложение
+   def main():
+    # ... твои функции ...
+    
+    print("🚀 Запуск бота...")
     app = Application.builder().token(TOKEN).build()
     
-    # Настраиваем диалог настройки
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ASK_PERIOD_START: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_period_start)],
-            ASK_CYCLE_LENGTH: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_cycle_length)],
-        },
-        fallbacks=[],
-    )
-    
-    # Регистрируем обработчики
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("calendar", calendar))
-    app.add_handler(CommandHandler("delete_my_data", delete_my_data))
+    # Добавь обработчики
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    # ... остальные handlers ...
     
-    logger.info("✅ Бот запущен с Supabase! Ctrl+C для остановки")
-    print("🌟 Бот работает! Тестируйте /start")
-    
-    # Запуск
+    print("✅ Бот готов к работе!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
