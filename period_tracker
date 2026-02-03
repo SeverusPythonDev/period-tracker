@@ -262,34 +262,15 @@ def main():
     init_db()
     
     # Создаём приложение
-   from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ БОТ ЖИВОЙ! Наконец-то! 💃")
 
 def main():
     print("🚀 Запуск бота...")
-    
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
-    
-    # Команды
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    
-    # Сообщения
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
     print("✅ Бот запущен!")
-    updater.start_polling()
-    updater.idle()
+    app.run_polling()
 
-# ВРЕМЕННЫЕ функции (замени потом)
-async def start(update, context):
-    update.message.reply_text("👋 Бот работает!")
-    
-async def help_command(update, context):
-    update.message.reply_text("Помощь!")
-    
-async def handle_message(update, context):
-    update.message.reply_text("Получил сообщение!")
-    
 if __name__ == "__main__":
     main()
