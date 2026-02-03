@@ -262,19 +262,22 @@ def main():
     init_db()
     
     # Создаём приложение
-   def main():
-    # ... твои функции ...
-    
+   from telegram.ext import Updater, CommandHandler
+
+def main():
     print("🚀 Запуск бота...")
-    app = Application.builder().token(TOKEN).build()
     
-    # Добавь обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    # ... остальные handlers ...
+    # v20.7 синтаксис!
+    updater = Updater(token=TOKEN)
+    dp = updater.dispatcher
+    
+    # ТВОИ обработчики (добавь свои функции)
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("help", help_command))
     
     print("✅ Бот готов к работе!")
-    app.run_polling(drop_pending_updates=True)
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
