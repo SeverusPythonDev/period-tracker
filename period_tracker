@@ -296,18 +296,24 @@ def main():
     return "OK"
 
 if __name__ == "__main__":
-    import threading  # ← ЭТОТ ОДИН ИМПОРТ НУЖЕН!
+    import threading
     
     def run_bot():
         asyncio.run(main())
     
     def fake_server():
+        from flask import Flask
+        app = Flask(__name__)
+        
+        @app.route('/')
+        def ping():
+            return '🤖 FloBot живёт! 24/7 бесплатно на Render!'
+        
         port = int(os.environ.get('PORT', 10000))
-        while True:
-            time.sleep(30)
+        app.run(host='0.0.0.0', port=port)
     
-    # Бот в фоне + фейк для Render
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
     fake_server()
+
