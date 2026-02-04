@@ -253,7 +253,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # === ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА ===
-def main():
+async def main():
+    await application.bot.delete_webhook(drop_pending_updates=True)
     """Запускает бота с инициализацией Supabase"""
     print("🚀 Инициализация Supabase...")
     init_db()
