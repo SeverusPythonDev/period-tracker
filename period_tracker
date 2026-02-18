@@ -1,328 +1,320 @@
-"""
-Полноценный Telegram бот для отслеживания менструального цикла
-Aiogram 3 + Supabase PostgreSQL + КНОПКИ + Flask для Render 24/7
-Готов к деплою! Все комментарии на русском ✅
-"""
-
 import os
-from threading import Thread  
-import asyncio
-from flask import Flask
-import time
 import logging
 from datetime import datetime, date, timedelta
-from urllib.parse import urlparse
-from dotenv import load_dotenv
-import psycopg2
-import requests  # ← Добавлено для проверки токена
+import sqlite3
+from aiohttp import web
 
-# 🔥 AIOGRAM 3 (УДАЛЕНО telegram.ext!)
-from aiogram import Bot, Dispatcher, F
+# === ПЕРЕМЕННЫЕ ===
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN не найден!")
+
+WEBHOOK_HOST = os.getenv("RAILWAY_PUBLIC_URL", "")
+if not WEBHOOK_HOST:
+    raise ValueError("❌ RAILWAY_PUBLIC_URL не задан")
+
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = WEBHOOK_HOST + WEBHOOK_PATH
+
+DATABASE_PATH = "/tmp/periods.db"
+
+# === AIORAM ===
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# === КЛАВИАТУРЫ ===
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton("📊 Мой цикл"), KeyboardButton("📈 Предсказание")],
-        [KeyboardButton("💊 Симптомы"), KeyboardButton("👫 Партнёр")],
-        [KeyboardButton("🆘 Помощь"), KeyboardButton("🗑️ Удалить данные")]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=False
-)
-
-cycle_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton("🔴 Менструация"), KeyboardButton("🟢 Фолликуляр"), KeyboardButton("🟡 Овуляция")],
-        [KeyboardButton("🟣 Лютеин"), KeyboardButton("📊 Главное меню")]
-    ],
-    resize_keyboard=True
-)
-
-inline_confirm_kb = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton("✅ Да, сохранить", callback_data="save_data")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-    ]
-)
-
-# === ЗАГРУЗКА СЕКРЕТОВ ===
-load_dotenv()
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DB_URL = os.getenv("DATABASE_URL")
-
-if not TOKEN:
-    raise ValueError("❌ TELEGRAM_BOT_TOKEN не найден!")
-if not DB_URL:
-    raise ValueError("❌ DATABASE_URL не найден!")
-
-# === НАСТРОЙКА ЛОГОВ ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 🔥 AIOGRAM 3: Bot и Dispatcher
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# === FSM СОСТОЯНИЯ ===
-class CycleTracker(StatesGroup):
+# === ПАРСИНГ ДАТЫ ===
+def parse_world_date(text):
+    clean = text.strip().replace(" ", "")
+    patterns = ["%d.%m.%Y", "%d.%m.%y", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y", "%Y-%m-%d", "%Y/%m/%d"]
+    for fmt in patterns:
+        try:
+            date_obj = datetime.strptime(clean, fmt)
+            if 1 <= date_obj.day <= 31 and 1 <= date_obj.month <= 12:
+                return date_obj
+        except:
+            continue
+    return None
+
+# === КЛАВИАТУРЫ ===
+main_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="📊 Мой цикл"), KeyboardButton(text="📈 Предсказание")],
+    [KeyboardButton(text="💊 Симптомы"), KeyboardButton(text="➕ Новый цикл")],
+    [KeyboardButton(text="🗑️ Удалить данные"), KeyboardButton(text="🆘 Помощь")]
+], resize_keyboard=True)
+
+cycle_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="🔴 Менструация"), KeyboardButton(text="🟢 Фолликуляр"), KeyboardButton(text="🟡 Овуляция")],
+    [KeyboardButton(text="🟣 Лютеин"), KeyboardButton(text="🏠 Главное меню")]
+], resize_keyboard=True)
+
+symptom_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Боли в животе", callback_data="symptom:cramps")],
+    [InlineKeyboardButton(text="Чувствительность груди", callback_data="symptom:breast")],
+    [InlineKeyboardButton(text="Головная боль", callback_data="symptom:headache")],
+    [InlineKeyboardButton(text="Усталость", callback_data="symptom:fatigue")],
+    [InlineKeyboardButton(text="Готово ✅", callback_data="symptom_done")]
+])
+
+# === FSM ===
+class NewCycle(StatesGroup):
     waiting_period_start = State()
+    waiting_period_length = State()
     waiting_cycle_length = State()
 
-# === SUPABASE ===
+# === БАЗА ===
 def get_db_connection():
-    """Подключение к Supabase PostgreSQL"""
-    return psycopg2.connect(DB_URL)
+    conn = sqlite3.connect(DATABASE_PATH)
+    return conn
 
 def init_db():
-    """Создаёт таблицу users"""
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        user_id BIGINT PRIMARY KEY,
-                        last_period_start TEXT NOT NULL,
-                        cycle_length INTEGER NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                conn.commit()
-                logger.info("✅ Supabase таблица готова!")
-    except Exception as e:
-        logger.error(f"❌ Supabase: {e}")
-        raise
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cycles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id BIGINT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_length INTEGER NOT NULL,
+                cycle_length INTEGER NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS symptoms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id BIGINT NOT NULL,
+                cycle_id INTEGER NOT NULL,
+                cycle_day INTEGER NOT NULL,
+                symptom TEXT NOT NULL,
+                FOREIGN KEY (cycle_id) REFERENCES cycles(id)
+            )
+        """)
+        conn.commit()
 
-def save_user_data(user_id: int, last_period: date, cycle_length: int):
-    """Сохранение данных пользователя"""
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    INSERT INTO users (user_id, last_period_start, cycle_length)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        last_period_start = EXCLUDED.last_period_start,
-                        cycle_length = EXCLUDED.cycle_length
-                """, (user_id, last_period.isoformat(), cycle_length))
-                conn.commit()
-    except Exception as e:
-        logger.error(f"❌ Сохранение: {e}")
+def get_last_cycle(user_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, period_start, period_length, cycle_length
+            FROM cycles
+            WHERE user_id = ?
+            ORDER BY period_start DESC LIMIT 1
+        """, (user_id,))
+        return cursor.fetchone()
 
-def get_user_data(user_id: int):
-    """Получение данных пользователя"""
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT last_period_start, cycle_length FROM users WHERE user_id = %s",
-                    (user_id,)
-                )
-                row = cursor.fetchone()
-                if row:
-                    return {
-                        "last_period_start": date.fromisoformat(row[0]),
-                        "cycle_length": row[1]
-                    }
-        return None
-    except Exception as e:
-        logger.error(f"❌ Получение данных: {e}")
-        return None
-
-def delete_user_data(user_id: int):
-    """Удаление данных"""
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
-                conn.commit()
-    except Exception as e:
-        logger.error(f"❌ Удаление: {e}")
-
-# 🔥 AIOGRAM 3 HANDLERS С КНОПКАМИ ✅
+# === ХЕНДЛЕРЫ ===
 @dp.message(Command("start"))
-async def start_handler(message: Message, state: FSMContext):
-    """🔥 /start с главной клавиатурой"""
-    await message.answer(
-        "🌸 *Добро пожаловать в трекер циклов!*\n\n"
-        "Укажите дату *последней* менструации:\n"
-        "`2026-02-01` (ГГГГ-ММ-ДД)",
-        reply_markup=main_kb,  # ← ОСНОВНАЯ КЛАВИАТУРА!
-        parse_mode="Markdown"
-    )
-    await state.set_state(CycleTracker.waiting_period_start)
+async def start_handler(message: Message):
+    await message.answer("🌸 Добро пожаловать! Нажми ➕ Новый цикл.", reply_markup=main_kb)
+
+@dp.message(F.text == "➕ Новый цикл")
+async def new_cycle_start(message: Message, state: FSMContext):
+    await message.answer("📅 Дата начала месячных? (15.02.26)", reply_markup=main_kb)
+    await state.set_state(NewCycle.waiting_period_start)
+
+@dp.message(NewCycle.waiting_period_start)
+async def process_period_start(message: Message, state: FSMContext):
+    date_obj = parse_world_date(message.text)
+    if not date_obj:
+        await message.answer("❌ Не понял дату. Пример: 15.02.26", reply_markup=main_kb)
+        return
+    await state.update_data(period_start=date_obj.date())
+    await message.answer("📏 Сколько дней шли месячные? (1–10)", reply_markup=main_kb)
+    await state.set_state(NewCycle.waiting_period_length)
+
+@dp.message(NewCycle.waiting_period_length)
+async def process_period_length(message: Message, state: FSMContext):
+    try:
+        days = int(message.text)
+        if not (1 <= days <= 10):
+            raise ValueError
+        await state.update_data(period_length=days)
+        await message.answer("🌀 Длина цикла? (21–40)", reply_markup=main_kb)
+        await state.set_state(NewCycle.waiting_cycle_length)
+    except:
+        await message.answer("❌ Введи число от 1 до 10.", reply_markup=main_kb)
+
+@dp.message(NewCycle.waiting_cycle_length)
+async def process_cycle_length(message: Message, state: FSMContext):
+    try:
+        cycle_len = int(message.text)
+        if not (21 <= cycle_len <= 40):
+            raise ValueError
+        data = await state.get_data()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO cycles (user_id, period_start, period_length, cycle_length)
+                VALUES (?, ?, ?, ?)
+            """, (message.from_user.id, data["period_start"].isoformat(), data["period_length"], cycle_len))
+            conn.commit()
+        await message.answer(
+            f"✅ Цикл сохранён!\n"
+            f"📅 Месячные: {data['period_start'].strftime('%d.%m.%Y')} ({data['period_length']} дн.)\n"
+            f"🌀 Цикл: {cycle_len} дней",
+            reply_markup=main_kb
+        )
+        await state.clear()
+    except:
+        await message.answer("❌ Цикл 21–40 дней.", reply_markup=main_kb)
 
 @dp.message(F.text == "📊 Мой цикл")
 async def my_cycle(message: Message):
-    """🔥 Кнопка 'Мой цикл'"""
     user_id = message.from_user.id
-    data = get_user_data(user_id)
-    
-    if not data:
-        await message.answer(
-            "📝 Настройте данные командой /start",
-            reply_markup=main_kb
-        )
+    cycle = get_last_cycle(user_id)
+    if not cycle:
+        await message.answer("📝 Сначала ➕ Новый цикл", reply_markup=main_kb)
         return
-    
-    last_period = data["last_period_start"]
-    cycle_length = data["cycle_length"]
-    days_since = (date.today() - last_period).days
+
+    cycle_id, period_start_str, period_length, cycle_length = cycle
+    last_period = date.fromisoformat(period_start_str)
+    today = date.today()
+    days_since = (today - last_period).days
     next_period = last_period + timedelta(days=cycle_length)
-    days_to_next = (next_period - date.today()).days
-    
-    status = "🔴 *Менструация*" if days_since <= 5 else \
-             f"🟢 День {days_since + 1}/{cycle_length}"
-    
+    days_to_next = (next_period - today).days
+
+    if days_since < 0:
+        status = "⏳ Цикл не начался"
+    elif days_since < period_length:
+        status = "🔴 Месячные"
+    elif days_to_next <= 5 and days_to_next > 0:
+        status = "🌫️ ПМС"
+    elif days_since < cycle_length // 2:
+        status = "🟢 Фолликулярная"
+    elif days_since < cycle_length // 2 + 2:
+        status = "🟡 Овуляция"
+    else:
+        status = "🟣 Лютеиновая"
+
     await message.answer(
-        f"📊 *СТАТУС ЦИКЛА*\n\n"
-        f"{status}\n\n"
-        f"📅 Следующая: `{next_period.strftime('%d.%m.%Y')}`\n"
-        f"⏳ Осталось: *{days_to_next}* дней",
-        reply_markup=cycle_kb,  # ← КЛАВИАТУРА ФАЗ!
-        parse_mode="Markdown"
+        f"📊 СТАТУС\n{status}\n"
+        f"📅 Следующие: {next_period.strftime('%d.%m.%Y')}\n"
+        f"⏳ До них: {max(0, days_to_next)} дней",
+        reply_markup=cycle_kb
     )
 
 @dp.message(F.text == "📈 Предсказание")
 async def prediction(message: Message):
-    """🔥 Кнопка 'Предсказание'"""
+    user_id = message.from_user.id
+    cycle = get_last_cycle(user_id)
+    if not cycle:
+        await message.answer("📝 Сначала добавьте цикл через ➕ Новый цикл", reply_markup=main_kb)
+        return
+
+    _, period_start_str, _, cycle_length = cycle
+    last_period = date.fromisoformat(period_start_str)
+    next_period = last_period + timedelta(days=cycle_length)
+    ovulation_day = last_period + timedelta(days=cycle_length // 2)
+
     await message.answer(
-        "🔮 *ПРЕДСКАЗАНИЕ*\n\n"
-        "🌙 Следующая менструация\n"
-        "💕 Фертильные дни\n"
-        "⭐ Овуляция\n\n"
-        "_Данные появятся после настройки_",
-        reply_markup=main_kb,
-        parse_mode="Markdown"
+        f"🔮 Предсказание:\n"
+        f"📅 Следующие месячные: {next_period.strftime('%d.%m.%Y')}\n"
+        f"🥚 Овуляция: {ovulation_day.strftime('%d.%m.%Y')}\n"
+        f"💡 ПМС начнётся за ~5 дней до месячных",
+        reply_markup=main_kb
     )
 
 @dp.message(F.text == "💊 Симптомы")
-async def symptoms(message: Message):
-    """🔥 Кнопка 'Симптомы'"""
-    await message.answer(
-        "💊 *ОТСЛЕЖИВАНИЕ СИМПТОМОВ*\n\n"
-        "• Боль внизу живота\n"
-        "• Чувствительность груди\n"
-        "• Настроение\n"
-        "• Энергия\n\n"
-        "_Функция в разработке ✨_",
-        reply_markup=main_kb
-    )
+async def log_symptoms(message: Message):
+    user_id = message.from_user.id
+    cycle = get_last_cycle(user_id)
+    if not cycle:
+        await message.answer("Сначала ➕ Новый цикл", reply_markup=main_kb)
+        return
 
-@dp.message(F.text == "👫 Партнёр")
-async def partner(message: Message):
-    """🔥 Кнопка 'Партнёр'"""
-    await message.answer(
-        "👫 *РЕЖИМ ПАРТНЁРА*\n\n"
-        "🔐 Код доступа: `PARTNER2026`\n\n"
-        "_Введите код для просмотра данных_",
-        reply_markup=main_kb
-    )
+    cycle_id, period_start_str, period_length, cycle_length = cycle
+    last_period = date.fromisoformat(period_start_str)
+    day_of_cycle = (date.today() - last_period).days + 1
 
-@dp.message(F.text == "🆘 Помощь")
-async def help_handler(message: Message):
-    """🔥 Кнопка 'Помощь'"""
-    await message.answer(
-        "🆘 *ПОМОЩЬ*\n\n"
-        "📊 Мой цикл — текущий статус\n"
-        "📈 Предсказание — даты овуляции\n"
-        "💊 Симптомы — дневник\n"
-        "👫 Партнёр — совместный доступ\n"
-        "🗑️ Удалить данные — очистка\n\n"
-        "_Все данные анонимны и защищены_",
-        reply_markup=main_kb,
-        parse_mode="Markdown"
-    )
+    if day_of_cycle < 1 or day_of_cycle > cycle_length:
+        await message.answer("Сегодня вне активного цикла. Добавьте новый, если начался!", reply_markup=main_kb)
+        return
+
+    await message.answer(f"💊 День {day_of_cycle}: выбери симптомы", reply_markup=symptom_kb)
+
+@dp.callback_query(F.data.startswith("symptom:"))
+async def save_symptom(callback: CallbackQuery):
+    symptom_key = callback.data.split(":")[1]
+    symptom_map = {"cramps": "Боли в животе", "breast": "Чувствительность груди", "headache": "Головная боль", "fatigue": "Усталость"}
+    name = symptom_map.get(symptom_key, "Неизвестный")
+
+    user_id = callback.from_user.id
+    cycle = get_last_cycle(user_id)
+    if not cycle:
+        await callback.answer("❌ Нет цикла")
+        return
+
+    cycle_id, period_start_str, _, _ = cycle
+    last_period = date.fromisoformat(period_start_str)
+    day = (date.today() - last_period).days + 1
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO symptoms (user_id, cycle_id, cycle_day, symptom) VALUES (?, ?, ?, ?)", (user_id, cycle_id, day, name))
+        conn.commit()
+    await callback.answer(f"✅ {name}")
+
+@dp.callback_query(F.data == "symptom_done")
+async def done_symptoms(callback: CallbackQuery):
+    await callback.message.edit_text("💊 Готово! Спасибо ❤️")
+
+@dp.message(F.text == "🏠 Главное меню")
+async def go_main(message: Message):
+    await message.answer("🏠 Главное меню", reply_markup=main_kb)
+
+@dp.message(F.text.in_(["🔴 Менструация", "🟢 Фолликуляр", "🟡 Овуляция", "🟣 Лютеин"]))
+async def handle_phase(message: Message):
+    await message.answer(f"Выбрано: {message.text}", reply_markup=cycle_kb)
 
 @dp.message(F.text == "🗑️ Удалить данные")
 async def delete_data(message: Message):
-    """🔥 Кнопка 'Удалить данные'"""
+    user_id = message.from_user.id
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM cycles WHERE user_id = ?", (user_id,))
+        cursor.execute("DELETE FROM symptoms WHERE user_id = ?", (user_id,))
+        conn.commit()
+    await message.answer("🗑️ Удалено", reply_markup=main_kb)
+
+@dp.message(F.text == "🆘 Помощь")
+async def help_cmd(message: Message):
     await message.answer(
-        "⚠️ *УДАЛЕНИЕ ДАННЫХ*\n\n"
-        "Это действие необратимо!\n\n"
-        "Вы уверены?",
-        reply_markup=inline_confirm_kb  # ← ИНЛАЙН КНОПКИ!
-    )
-
-@dp.callback_query(F.data == "save_data")
-async def confirm_delete(callback: CallbackQuery):
-    """🔥 Callback 'Да, сохранить/удалить'"""
-    user_id = callback.from_user.id
-    delete_user_data(user_id)
-    await callback.message.edit_text(
-        "🗑️ *Данные удалены!*\n\n"
-        "Можете начать заново с /start",
-        reply_markup=None,
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "cancel")
-async def cancel_delete(callback: CallbackQuery):
-    """🔥 Callback 'Отмена'"""
-    await callback.message.edit_text(
-        "✅ Отмена. Данные сохранены!",
-        reply_markup=main_kb
-    )
-    await callback.answer()
-
-@dp.message(F.text == "📊 Главное меню")
-async def back_to_main(message: Message):
-    """🔥 Возврат в главное меню"""
-    await message.answer(
-        "🏠 *ГЛАВНОЕ МЕНЮ*",
+        "ℹ️ Помощь:\n"
+        "➕ Новый цикл — начать\n"
+        "📊 Мой цикл — статус\n"
+        "💊 Симптомы — отметить\n"
+        "📈 Предсказание — даты\n"
+        "🏠 Главное меню — вернуться",
         reply_markup=main_kb
     )
 
-@dp.message(Command("calendar"))
-async def calendar_handler(message: Message):
-    """🔥 /calendar"""
-    await my_cycle(message)
+# === ВЕБХУКИ ===
+async def on_startup(bot: Bot):
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
 
-# === ГЛАВНАЯ ФУНКЦИЯ ===
-async def main():
-    """🚀 Запуск бота с кнопками"""
+async def on_shutdown(bot: Bot):
     await bot.delete_webhook(drop_pending_updates=True)
-    print("🚀 Инициализация...")
-    init_db()
-    
-    # 🔥 AIOGRAM 3: Запуск polling!
-    print("✅ Бот с кнопками запущен!")
-    await dp.start_polling(bot)
+    logger.info("🔌 Webhook удалён")
 
-def check_telegram_webhook():
-    """Проверка токена"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getMe"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            print("✅ TELEGRAM ТОКЕН ОК!")
-            return True
-    except:
-        pass
-    print("❌ Telegram check failed")
-    return False
+def create_app():
+    app = web.Application()
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot, on_startup=on_startup, on_shutdown=on_shutdown)
+    return app
 
-# === FLASK ДЛЯ RENDER 24/7 ===
 if __name__ == "__main__":
-    check_telegram_webhook()
     init_db()
-    
-    def run_bot():
-        asyncio.run(main())
-    
-    bot_thread = Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    app = Flask(__name__)
-    
-    @app.route('/')
-    def ping():
-        return '🤖 FloBot с КНОПКАМИ живёт 24/7!'
-    
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app = create_app()
+    port = int(os.getenv("PORT", 8000))
+    web.run_app(app, host="0.0.0.0", port=port)
